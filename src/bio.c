@@ -57,13 +57,20 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/*
+ * 这个模块主要实现了后台执行io操作的功能，后台文件同步，后台关闭文件等
+ */
 
 #include "server.h"
 #include "bio.h"
 
+//后台操作的线程
 static pthread_t bio_threads[BIO_NUM_OPS];
+//后台操作的线程使用的锁
 static pthread_mutex_t bio_mutex[BIO_NUM_OPS];
+//后台线程关联的条件变量
 static pthread_cond_t bio_condvar[BIO_NUM_OPS];
+//后台操作的任务列表
 static list *bio_jobs[BIO_NUM_OPS];
 /* The following array is used to hold the number of pending jobs for every
  * OP type. This allows us to export the bioPendingJobsOfType() API that is
@@ -71,14 +78,18 @@ static list *bio_jobs[BIO_NUM_OPS];
  * objects shared with the background thread. The main thread will just wait
  * that there are no longer jobs of this type to be executed before performing
  * the sensible operation. This data is also useful for reporting. */
+//标记线程中需要执行的任务个数
 static unsigned long long bio_pending[BIO_NUM_OPS];
 
 /* This structure represents a background Job. It is only used locally to this
  * file as the API does not expose the internals at all. */
+//后台任务结构体
 struct bio_job {
+    //任务的创建时间
     time_t time; /* Time at which the job was created. */
     /* Job specific arguments pointers. If we need to pass more than three
      * arguments we can just pass a pointer to a structure or alike. */
+    //任务使用到的参数，最多三个
     void *arg1, *arg2, *arg3;
 };
 
@@ -86,9 +97,13 @@ void *bioProcessBackgroundJobs(void *arg);
 
 /* Make sure we have enough stack to perform all the things we do in the
  * main thread. */
+//redis线程的堆栈大小
 #define REDIS_THREAD_STACK_SIZE (1024*1024*4)
 
 /* Initialize the background system, spawning the thread. */
+/*
+ *初始化后台io操作线程
+ */
 void bioInit(void) {
     pthread_attr_t attr;
     pthread_t thread;
@@ -96,6 +111,7 @@ void bioInit(void) {
     int j;
 
     /* Initialization of state vars and objects */
+    //初始化后台线程使用到的数据，如：锁，关联变量，任务列表。。。
     for (j = 0; j < BIO_NUM_OPS; j++) {
         pthread_mutex_init(&bio_mutex[j],NULL);
         pthread_cond_init(&bio_condvar[j],NULL);
@@ -104,6 +120,7 @@ void bioInit(void) {
     }
 
     /* Set the stack size as by default it may be small in some system */
+    //设置线程堆栈大小
     pthread_attr_init(&attr);
     pthread_attr_getstacksize(&attr,&stacksize);
     if (!stacksize) stacksize = 1; /* The world is full of Solaris Fixes */
@@ -113,9 +130,11 @@ void bioInit(void) {
     /* Ready to spawn our threads. We use the single argument the thread
      * function accepts in order to pass the job ID the thread is
      * responsible of. */
+    //创建后台线程
     for (j = 0; j < BIO_NUM_OPS; j++) {
         void *arg = (void*)(unsigned long) j;
         if (pthread_create(&thread,&attr,bioProcessBackgroundJobs,arg) != 0) {
+            //创建失败，需要退出程序
             serverLog(LL_WARNING,"Fatal: Can't initialize Background Jobs.");
             exit(1);
         }
@@ -123,27 +142,40 @@ void bioInit(void) {
     }
 }
 
+/*
+ * 创建一个后台运行的程序
+ */
 void bioCreateBackgroundJob(int type, void *arg1, void *arg2, void *arg3) {
+    //分配内存
     struct bio_job *job = zmalloc(sizeof(*job));
-
+    //初始化数据
     job->time = time(NULL);
     job->arg1 = arg1;
     job->arg2 = arg2;
     job->arg3 = arg3;
+    //需要考虑线程同步
     pthread_mutex_lock(&bio_mutex[type]);
+    //添加到表尾
     listAddNodeTail(bio_jobs[type],job);
+    //增加个数
     bio_pending[type]++;
+    //发送信号，唤醒线程
     pthread_cond_signal(&bio_condvar[type]);
     pthread_mutex_unlock(&bio_mutex[type]);
 }
 
+/*
+ * 线程执行的回调函数
+ */
 void *bioProcessBackgroundJobs(void *arg) {
     struct bio_job *job;
+    //线程处理的任务类型
     unsigned long type = (unsigned long) arg;
     sigset_t sigset;
 
     /* Check that the type is within the right interval. */
     if (type >= BIO_NUM_OPS) {
+        //类型错误
         serverLog(LL_WARNING,
             "Warning: bio thread started with wrong type %lu",type);
         return NULL;
@@ -162,16 +194,18 @@ void *bioProcessBackgroundJobs(void *arg) {
     if (pthread_sigmask(SIG_BLOCK, &sigset, NULL))
         serverLog(LL_WARNING,
             "Warning: can't mask SIGALRM in bio.c thread: %s", strerror(errno));
-
+    //线程循环，一直循环
     while(1) {
         listNode *ln;
 
         /* The loop always starts with the lock hold. */
+        //如果当前没有需要处理的事件，就一直挂起等待下一次唤醒
         if (listLength(bio_jobs[type]) == 0) {
             pthread_cond_wait(&bio_condvar[type],&bio_mutex[type]);
             continue;
         }
         /* Pop the job from the queue. */
+        //获取第一个需要处理的事件
         ln = listFirst(bio_jobs[type]);
         job = ln->value;
         /* It is now possible to unlock the background system as we know have
@@ -180,12 +214,15 @@ void *bioProcessBackgroundJobs(void *arg) {
 
         /* Process the job accordingly to its type. */
         if (type == BIO_CLOSE_FILE) {
+            //如果是关闭文件的事件，就去关闭文件
             close((long)job->arg1);
         } else if (type == BIO_AOF_FSYNC) {
+            //如果是文件同步的事件就去同步文件
             aof_fsync((long)job->arg1);
         } else {
             serverPanic("Wrong job type in bioProcessBackgroundJobs().");
         }
+        释放资源
         zfree(job);
 
         /* Lock again before reiterating the loop, if there are no longer
@@ -197,8 +234,12 @@ void *bioProcessBackgroundJobs(void *arg) {
 }
 
 /* Return the number of pending jobs of the specified type. */
+/*
+ * 获取任务个数
+ */
 unsigned long long bioPendingJobsOfType(int type) {
     unsigned long long val;
+    //考虑线程安全
     pthread_mutex_lock(&bio_mutex[type]);
     val = bio_pending[type];
     pthread_mutex_unlock(&bio_mutex[type]);
@@ -209,10 +250,14 @@ unsigned long long bioPendingJobsOfType(int type) {
  * used only when it's critical to stop the threads for some reason.
  * Currently Redis does this only on crash (for instance on SIGSEGV) in order
  * to perform a fast memory check without other threads messing with memory. */
+/*
+ * 关闭线程，因为线程回调函数里是一个死循环，所以需要外部强制关闭
+ */
 void bioKillThreads(void) {
     int err, j;
 
     for (j = 0; j < BIO_NUM_OPS; j++) {
+        //关闭
         if (pthread_cancel(bio_threads[j]) == 0) {
             if ((err = pthread_join(bio_threads[j],NULL)) != 0) {
                 serverLog(LL_WARNING,

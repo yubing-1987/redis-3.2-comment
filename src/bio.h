@@ -36,6 +36,9 @@ time_t bioOlderJobOfType(int type);
 void bioKillThreads(void);
 
 /* Background job opcodes */
+//关闭文件的类型
 #define BIO_CLOSE_FILE    0 /* Deferred close(2) syscall. */
+//同步文件的类型
 #define BIO_AOF_FSYNC     1 /* Deferred AOF fsync. */
+//后台IO操作类型的个数
 #define BIO_NUM_OPS       2
