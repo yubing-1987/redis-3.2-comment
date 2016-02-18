@@ -40,6 +40,7 @@
 
 #include <stdio.h>
 
+//标记为是否是调试模式
 static int evport_debug = 0;
 
 /*
@@ -67,26 +68,40 @@ static int evport_debug = 0;
  */
 #define MAX_EVENT_BATCHSZ 512
 
+/*
+ * poll方式的事件驱动信息
+ */
 typedef struct aeApiState {
+    //端口句柄
     int     portfd;                             /* event port */
+    //需要处理的事情个数
     int     npending;                           /* # of pending fds */
+    //处理中的事件索引
     int     pending_fds[MAX_EVENT_BATCHSZ];     /* pending fds */
+    //处理中的事件类型
     int     pending_masks[MAX_EVENT_BATCHSZ];   /* pending fds' masks */
 } aeApiState;
 
+/*
+ * 创建事件驱动
+ * eventLoop    关联的事件池指针
+ */
 static int aeApiCreate(aeEventLoop *eventLoop) {
     int i;
+    //申请内存空间
     aeApiState *state = zmalloc(sizeof(aeApiState));
     if (!state) return -1;
 
+    //创建端口
     state->portfd = port_create();
     if (state->portfd == -1) {
+        //创建不成功，释放资源
         zfree(state);
         return -1;
     }
 
     state->npending = 0;
-
+    //全部标记为未启用
     for (i = 0; i < MAX_EVENT_BATCHSZ; i++) {
         state->pending_fds[i] = -1;
         state->pending_masks[i] = AE_NONE;
@@ -96,36 +111,56 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
     return 0;
 }
 
+/*
+ * 调整事件缓冲区容量，这里什么都没干
+ */
 static int aeApiResize(aeEventLoop *eventLoop, int setsize) {
     /* Nothing to resize here. */
     return 0;
 }
 
+/*
+ * 关闭事件驱动，释放内存
+ * eventLoop    事件池指针
+ */
 static void aeApiFree(aeEventLoop *eventLoop) {
     aeApiState *state = eventLoop->apidata;
-
+    //关闭事件驱动端口
     close(state->portfd);
+    //释放内存
     zfree(state);
 }
 
+/*
+ * 查找指定事件句柄的索引
+ * state    事件驱动的状态指针
+ * fd       事件句柄
+ */
 static int aeApiLookupPending(aeApiState *state, int fd) {
     int i;
-
+    //遍历查找
     for (i = 0; i < state->npending; i++) {
         if (state->pending_fds[i] == fd)
             return (i);
     }
-
+    //没找到
     return (-1);
 }
 
 /*
  * Helper function to invoke port_associate for the given fd and mask.
  */
+/*
+ * 将portfd和fd进行关联，响应mask标记的事件
+ * where    描述信息指针
+ * portfd   事件驱动端口描述符
+ * fd       流描述符，被监听对象
+ * mask     监听内容
+ */
 static int aeApiAssociate(const char *where, int portfd, int fd, int mask) {
     int events = 0;
     int rv, err;
-
+    //计算监听内容
     if (mask & AE_READABLE)
         events |= POLLIN;
     if (mask & AE_WRITABLE)
@@ -133,7 +168,7 @@ static int aeApiAssociate(const char *where, int portfd, int fd, int mask) {
 
     if (evport_debug)
         fprintf(stderr, "%s: port_associate(%d, 0x%x) = ", where, fd, events);
-
+    //进行关联
     rv = port_associate(portfd, PORT_SOURCE_FD, fd, events,
         (void *)(uintptr_t)mask);
     err = errno;
@@ -142,6 +177,7 @@ static int aeApiAssociate(const char *where, int portfd, int fd, int mask) {
         fprintf(stderr, "%d (%s)\n", rv, rv == 0 ? "no error" : strerror(err));
 
     if (rv == -1) {
+        //关联失败，输出信息
         fprintf(stderr, "%s: port_associate: %s\n", where, strerror(err));
 
         if (err == EAGAIN)
@@ -151,6 +187,12 @@ static int aeApiAssociate(const char *where, int portfd, int fd, int mask) {
     return rv;
 }
 
+/*
+ * 添加事件
+ * eventLoop    事件池指针
+ * fd           流描述符
+ * mask         监听类型
+ */
 static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     aeApiState *state = eventLoop->apidata;
     int fullmask, pfd;
@@ -163,7 +205,9 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
      * must be sure to include whatever events are already associated when
      * we call port_associate() again.
      */
+    //计算新的类型
     fullmask = mask | eventLoop->events[fd].mask;
+    //查找是否已经正在被要求处理
     pfd = aeApiLookupPending(state, fd);
 
     if (pfd != -1) {
@@ -175,20 +219,27 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
          */
         if (evport_debug)
             fprintf(stderr, "aeApiAddEvent: adding to pending fd %d\n", fd);
+        //如果已经在监听就直接设置新的掩码，这里不需要立刻关联，等到aeApiPoll调用的时候再关联
         state->pending_masks[pfd] |= fullmask;
         return 0;
     }
-
+    //调用关联程序
     return (aeApiAssociate("aeApiAddEvent", state->portfd, fd, fullmask));
 }
 
+/*
+ * 删除一个事件
+ * eventLoop    事件池指针
+ * fd           流描述符
+ * mask         待删除的监听掩码
+ */
 static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
     aeApiState *state = eventLoop->apidata;
     int fullmask, pfd;
 
     if (evport_debug)
         fprintf(stderr, "del fd %d mask 0x%x\n", fd, mask);
-
+    //判断是否正在被要求处理
     pfd = aeApiLookupPending(state, fd);
 
     if (pfd != -1) {
@@ -200,11 +251,12 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
          * associated with the port.  All we need to do is update
          * pending_mask appropriately.
          */
+        //删除被监听的类型
         state->pending_masks[pfd] &= ~mask;
-
+        //如果删除后已经是未启用状态，需要再设置事件句柄为无效
         if (state->pending_masks[pfd] == AE_NONE)
             state->pending_fds[pfd] = -1;
-
+        //处理函数中会进行剩余的删除操作
         return;
     }
 
@@ -215,7 +267,7 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
      * events are without looking into the eventLoop state directly.  We rely on
      * the fact that our caller has already updated the mask in the eventLoop.
      */
-
+    //删除当前挂起的事件
     fullmask = eventLoop->events[fd].mask;
     if (fullmask == AE_NONE) {
         /*
@@ -224,13 +276,13 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
          */
         if (evport_debug)
             fprintf(stderr, "aeApiDelEvent: port_dissociate(%d)\n", fd);
-
+        //删除关联
         if (port_dissociate(state->portfd, PORT_SOURCE_FD, fd) != 0) {
             perror("aeApiDelEvent: port_dissociate");
             abort(); /* will not return */
         }
     } else if (aeApiAssociate("aeApiDelEvent", state->portfd, fd,
-        fullmask) != 0) {
+        fullmask) != 0) {//修改关联
         /*
          * ENOMEM is a potentially transient condition, but the kernel won't
          * generally return it unless things are really bad.  EAGAIN indicates
@@ -242,6 +294,11 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
     }
 }
 
+/*
+ * 事件处理函数
+ * eventLoop    事件池指针
+ * tvp          超时时间
+ */
 static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
     struct timespec timeout, *tsp;
@@ -254,6 +311,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
      * port now, before calling port_get().  See the block comment at the top of
      * this file for an explanation of why.
      */
+    //重新关联驱动和事件
     for (i = 0; i < state->npending; i++) {
         if (state->pending_fds[i] == -1)
             /* This fd has since been deleted. */
@@ -264,13 +322,13 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             /* See aeApiDelEvent for why this case is fatal. */
             abort();
         }
-
+        //因为下面马上等待了，所以全部设置为未启用
         state->pending_masks[i] = AE_NONE;
         state->pending_fds[i] = -1;
     }
 
     state->npending = 0;
-
+    //计算超时事件
     if (tvp != NULL) {
         timeout.tv_sec = tvp->tv_sec;
         timeout.tv_nsec = tvp->tv_usec * 1000;
@@ -284,6 +342,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
      * So if we get ETIME, we check nevents, too.
      */
     nevents = 1;
+    //监听，得到需要处理的事件，或等到超时
     if (port_getn(state->portfd, event, MAX_EVENT_BATCHSZ, &nevents,
         tsp) == -1 && (errno != ETIME || nevents == 0)) {
         if (errno == ETIME || errno == EINTR)
@@ -293,23 +352,23 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
         perror("aeApiPoll: port_get");
         abort();
     }
-
+    //需要处理的事件个数
     state->npending = nevents;
-
+    //循环遍历，构建待处理的事件列表
     for (i = 0; i < nevents; i++) {
             mask = 0;
             if (event[i].portev_events & POLLIN)
                 mask |= AE_READABLE;
             if (event[i].portev_events & POLLOUT)
                 mask |= AE_WRITABLE;
-
+            //需要处理的事件信息记录在这里
             eventLoop->fired[i].fd = event[i].portev_object;
             eventLoop->fired[i].mask = mask;
 
             if (evport_debug)
                 fprintf(stderr, "aeApiPoll: fd %d mask 0x%x\n",
                     (int)event[i].portev_object, mask);
-
+            //内部使用的事件信息记录在这里
             state->pending_fds[i] = event[i].portev_object;
             state->pending_masks[i] = (uintptr_t)event[i].portev_user;
     }
@@ -317,6 +376,9 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     return nevents;
 }
 
+/*
+ * 获取事件驱动名称
+ */
 static char *aeApiName(void) {
     return "evport";
 }
