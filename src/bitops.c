@@ -28,6 +28,10 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+ /*
+  * redis位操作的命令实现模块
+  */
+
 #include "server.h"
 
 /* -----------------------------------------------------------------------------
@@ -37,14 +41,18 @@
 /* This helper function used by GETBIT / SETBIT parses the bit offset argument
  * making sure an error is returned if it is negative or if it overflows
  * Redis 512 MB limit for the string value. */
+/*
+ * 从object中读取位的偏移量，0~512MB之间
+ */
 static int getBitOffsetFromArgument(client *c, robj *o, size_t *offset) {
     long long loffset;
     char *err = "bit offset is not an integer or out of range";
-
+    //获取偏移量的值，如果失败，就会发送错误信息到客户端，并返回
     if (getLongLongFromObjectOrReply(c,o,&loffset,err) != C_OK)
         return C_ERR;
 
     /* Limit offset to 512MB in bytes */
+    //判断偏移量是否合法
     if ((loffset < 0) || ((unsigned long long)loffset >> 3) >= (512*1024*1024))
     {
         addReplyError(c,err);
@@ -58,19 +66,25 @@ static int getBitOffsetFromArgument(client *c, robj *o, size_t *offset) {
 /* Count number of bits set in the binary array pointed by 's' and long
  * 'count' bytes. The implementation of this function is required to
  * work with a input string length up to 512 MB. */
+/*
+ * 计算内存区域中bit位是[1]的个数，内存大小不能草果512MB
+ */
 size_t redisPopcount(void *s, long count) {
     size_t bits = 0;
     unsigned char *p = s;
     uint32_t *p4;
+    //字节中对应的bit为[1]的个数
     static const unsigned char bitsinbyte[256] = {0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,4,5,5,6,5,6,6,7,5,6,6,7,6,7,7,8};
 
     /* Count initial bytes not aligned to 32 bit. */
+    //不是32bit对齐的需要先对齐
     while((unsigned long)p & 3 && count) {
         bits += bitsinbyte[*p++];
         count--;
     }
 
     /* Count bits 28 bytes at a time */
+    //28个字节一组的进行计算
     p4 = (uint32_t*)p;
     while(count>=28) {
         uint32_t aux1, aux2, aux3, aux4, aux5, aux6, aux7;
@@ -107,6 +121,7 @@ size_t redisPopcount(void *s, long count) {
                     ((aux7 + (aux7 >> 4)) & 0x0F0F0F0F))* 0x01010101) >> 24;
     }
     /* Count the remaining bytes. */
+    //计算剩余的
     p = (unsigned char*)p4;
     while(count--) bits += bitsinbyte[*p++];
     return bits;
@@ -119,6 +134,10 @@ size_t redisPopcount(void *s, long count) {
  * no zero bit is found, it returns count*8 assuming the string is zero
  * padded on the right. However if 'bit' is 1 it is possible that there is
  * not a single set bit in the bitmap. In this special case -1 is returned. */
+/*
+ * 查找第一个bit和传入的参数[bit]一致的位置
+ * 没有找到匹配的时候，[bit]==[0]
+ */
 long redisBitpos(void *s, unsigned long count, int bit) {
     unsigned long *l;
     unsigned char *c;
@@ -457,6 +476,9 @@ void bitopCommand(client *c) {
 }
 
 /* BITCOUNT key [start end] */
+/*
+ * BITCOUNT命令，计算key对应的值的[1]的位数
+ */
 void bitcountCommand(client *c) {
     robj *o;
     long start, end, strlen;
@@ -464,11 +486,13 @@ void bitcountCommand(client *c) {
     char llbuf[32];
 
     /* Lookup, check for type, and return 0 for non existing keys. */
+    //获取redis数据
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,o,OBJ_STRING)) return;
 
     /* Set the 'p' pointer to the string, that can be just a stack allocated
      * array if our string was integer encoded. */
+    //获取redis数据实际的字符串
     if (o->encoding == OBJ_ENCODING_INT) {
         p = (unsigned char*) llbuf;
         strlen = ll2string(llbuf,sizeof(llbuf),(long)o->ptr);
@@ -478,22 +502,28 @@ void bitcountCommand(client *c) {
     }
 
     /* Parse start/end range if any. */
+    //计算起止位置
     if (c->argc == 4) {
+        //计算开始位置
         if (getLongFromObjectOrReply(c,c->argv[2],&start,NULL) != C_OK)
             return;
+        //计算结束位置
         if (getLongFromObjectOrReply(c,c->argv[3],&end,NULL) != C_OK)
             return;
         /* Convert negative indexes */
+        //规范化起始位置
         if (start < 0) start = strlen+start;
         if (end < 0) end = strlen+end;
         if (start < 0) start = 0;
         if (end < 0) end = 0;
         if (end >= strlen) end = strlen-1;
     } else if (c->argc == 2) {
+        //没有设置起始位置，就是需要计算整个字符串
         /* The whole string. */
         start = 0;
         end = strlen-1;
     } else {
+        //参数个数不合法
         /* Syntax error. */
         addReply(c,shared.syntaxerr);
         return;
@@ -502,15 +532,19 @@ void bitcountCommand(client *c) {
     /* Precondition: end >= 0 && end < strlen, so the only condition where
      * zero can be returned is: start > end. */
     if (start > end) {
+        //起止位置设置错误，直接返回0
         addReply(c,shared.czero);
     } else {
         long bytes = end-start+1;
-
+        //计算位中为[1]的个数，并返回
         addReplyLongLong(c,redisPopcount(p+start,bytes));
     }
 }
 
 /* BITPOS key bit [start [end]] */
+/*
+ * BITPOST命令的实现，查找第一个出现[bit]的位置
+ */
 void bitposCommand(client *c) {
     robj *o;
     long bit, start, end, strlen;
@@ -520,6 +554,7 @@ void bitposCommand(client *c) {
 
     /* Parse the bit argument to understand what we are looking for, set
      * or clear bits. */
+    //获取需要查找的标识位，只能是[0]或[1]
     if (getLongFromObjectOrReply(c,c->argv[2],&bit,NULL) != C_OK)
         return;
     if (bit != 0 && bit != 1) {
@@ -530,15 +565,19 @@ void bitposCommand(client *c) {
     /* If the key does not exist, from our point of view it is an infinite
      * array of 0 bits. If the user is looking for the fist clear bit return 0,
      * If the user is looking for the first set bit, return -1. */
+    //查找key对应的redis数据
     if ((o = lookupKeyRead(c->db,c->argv[1])) == NULL) {
         addReplyLongLong(c, bit ? -1 : 0);
         return;
     }
+    //不是字符串的数据就直接返回，只有字符串的数据才有位操作
     if (checkType(c,o,OBJ_STRING)) return;
 
     /* Set the 'p' pointer to the string, that can be just a stack allocated
      * array if our string was integer encoded. */
+    //字符串有两种内部结构，如果是字符串数字，就使用INT进行存储，其它使用字符串存储
     if (o->encoding == OBJ_ENCODING_INT) {
+        //int类型需要先转成真正的字符串
         p = (unsigned char*) llbuf;
         strlen = ll2string(llbuf,sizeof(llbuf),(long)o->ptr);
     } else {
@@ -547,27 +586,34 @@ void bitposCommand(client *c) {
     }
 
     /* Parse start/end range if any. */
+    //计算查找的起止位置
     if (c->argc == 4 || c->argc == 5) {
+        //命令中设置了开始的位置
         if (getLongFromObjectOrReply(c,c->argv[3],&start,NULL) != C_OK)
             return;
         if (c->argc == 5) {
+            //命令中设置了结束的位置
             if (getLongFromObjectOrReply(c,c->argv[4],&end,NULL) != C_OK)
                 return;
             end_given = 1;
         } else {
+            //否则结束位置设置为字符串末尾
             end = strlen-1;
         }
         /* Convert negative indexes */
+        //规范化起始位置
         if (start < 0) start = strlen+start;
         if (end < 0) end = strlen+end;
         if (start < 0) start = 0;
         if (end < 0) end = 0;
         if (end >= strlen) end = strlen-1;
     } else if (c->argc == 3) {
+        //如果没有设置起止位置，就是表示从字符串头查找到字符串尾
         /* The whole string. */
         start = 0;
         end = strlen-1;
     } else {
+        //其它情况表示参数错误
         /* Syntax error. */
         addReply(c,shared.syntaxerr);
         return;
@@ -576,9 +622,11 @@ void bitposCommand(client *c) {
     /* For empty ranges (start > end) we return -1 as an empty range does
      * not contain a 0 nor a 1. */
     if (start > end) {
+        //开始大于结尾，直接返回错误
         addReplyLongLong(c, -1);
     } else {
         long bytes = end-start+1;
+        //查找第一个满足要求的位置
         long pos = redisBitpos(p+start,bytes,bit);
 
         /* If we are looking for clear bits, and the user specified an exact
