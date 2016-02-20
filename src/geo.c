@@ -28,6 +28,11 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/*
+ * 这个模块是redis对于位置数据操作的模块，
+ * 位置数据本质使用的是redis中有序集来实现的
+ */
+
 #include "geo.h"
 #include "geohash_helper.h"
 
@@ -49,9 +54,14 @@ int zslValueLteMax(double value, zrangespec *spec);
  * ==================================================================== */
 
 /* Create a new array of geoPoints. */
+/*
+ * 创建一个新的位置数据，数据是空的
+ */
 geoArray *geoArrayCreate(void) {
+    //分配内存
     geoArray *ga = zmalloc(sizeof(*ga));
     /* It gets allocated on first geoArrayAppend() call. */
+    //初始化数据
     ga->array = NULL;
     ga->buckets = 0;
     ga->used = 0;
@@ -60,27 +70,46 @@ geoArray *geoArrayCreate(void) {
 
 /* Add a new entry and return its pointer so that the caller can populate
  * it with data. */
+/*
+ * 从地理位置数组中获取一个未被使用的地理位置指针，如果缓冲区都被使用了，就会扩容
+ */
 geoPoint *geoArrayAppend(geoArray *ga) {
     if (ga->used == ga->buckets) {
+        //缓冲区已经被用光了，需要扩容
+        //第一次大小为8，以后扩容都是翻倍的
         ga->buckets = (ga->buckets == 0) ? 8 : ga->buckets*2;
+        //重新分配内存空间
         ga->array = zrealloc(ga->array,sizeof(geoPoint)*ga->buckets);
     }
+    //获取指针
     geoPoint *gp = ga->array+ga->used;
+    //标记被使用数加一
     ga->used++;
     return gp;
 }
 
 /* Destroy a geoArray created with geoArrayCreate(). */
+/*
+ * 销毁地理位置数组，释放内存
+ */
 void geoArrayFree(geoArray *ga) {
     size_t i;
+    //释放每一个地理位置名称字符串
     for (i = 0; i < ga->used; i++) sdsfree(ga->array[i].member);
+    //释放缓冲区
     zfree(ga->array);
+    //释放数组内存
     zfree(ga);
 }
 
 /* ====================================================================
  * Helpers
  * ==================================================================== */
+/*
+ * 根据bits得到xy的值
+ * bits实际就是redis有序集的分数，xy就是地理位置的经纬度
+ * 所以这个函数就是通过有序集的分数得到地理位置的经纬度
+ */
 int decodeGeohash(double bits, double *xy) {
     GeoHashBits hash = { .bits = (uint64_t)bits, .step = GEO_STEP_MAX };
     return geohashDecodeToLongLatWGS84(hash, xy);
@@ -89,14 +118,22 @@ int decodeGeohash(double bits, double *xy) {
 /* Input Argument Helper */
 /* Take a pointer to the latitude arg then use the next arg for longitude.
  * On parse error C_ERR is returned, otherwise C_OK. */
+/*
+ * 从参数中得到经纬度的值，并对值进行基本的校验
+ * 如果有任何的不合法，就会直接向客户端发送错误信息，并返回错误标识
+ */
 int extractLongLatOrReply(client *c, robj **argv, double *xy) {
     int i;
     for (i = 0; i < 2; i++) {
+        //读取经纬度的值，如果读取错误就返回错误信息
         if (getDoubleFromObjectOrReply(c, argv[i], xy + i, NULL) !=
             C_OK) {
             return C_ERR;
         }
     }
+    //对经纬度进行基本的校验
+    //维度范围[180]~[-180]
+    //经度范围[85.05112878]~[-85.05112878]
     if (xy[0] < GEO_LONG_MIN || xy[0] > GEO_LONG_MAX ||
         xy[1] < GEO_LAT_MIN  || xy[1] > GEO_LAT_MAX) {
         addReplySds(c, sdscatprintf(sdsempty(),
@@ -109,10 +146,14 @@ int extractLongLatOrReply(client *c, robj **argv, double *xy) {
 /* Input Argument Helper */
 /* Decode lat/long from a zset member's score.
  * Returns C_OK on successful decoding, otherwise C_ERR is returned. */
+/*
+ * 从redis数据中读取经纬度
+ */
 int longLatFromMember(robj *zobj, robj *member, double *xy) {
     double score = 0;
-
+    //从redis有序表中读取数据的分数
     if (zsetScore(zobj, member, &score) == C_ERR) return C_ERR;
+    //从分数中解码出经纬度
     if (!decodeGeohash(score, xy)) return C_ERR;
     return C_OK;
 }
@@ -123,18 +164,32 @@ int longLatFromMember(robj *zobj, robj *member, double *xy) {
  *
  * If the unit is not valid, an error is reported to the client, and a value
  * less than zero is returned. */
+/*
+ * 根据不同的单位名称获取换算比例，区分大小写
+ * 支持的单位名称：
+ *      m        米
+ *      km       前面
+ *      ft       英尺
+ *      mi       英里
+ */
 double extractUnitOrReply(client *c, robj *unit) {
+    //获取名称
     char *u = unit->ptr;
 
     if (!strcmp(u, "m")) {
+        //米
         return 1;
     } else if (!strcmp(u, "km")) {
+        //千米
         return 1000;
     } else if (!strcmp(u, "ft")) {
+        //英尺
         return 0.3048;
     } else if (!strcmp(u, "mi")) {
+        //英里
         return 1609.34;
     } else {
+        //不识别的单位，直接告诉前台错误
         addReplyError(c,
             "unsupported unit provided. please use m, km, ft, mi");
         return -1;
@@ -148,18 +203,25 @@ double extractUnitOrReply(client *c, robj *unit) {
  * to use in order to convert meters to the unit.
  *
  * On error a value less than zero is returned. */
+/*
+ * 根据单位还原到以米为单位的距离
+ * 如果操作失败，就会返回[-1]，否则返回还原后的距离
+ */
 double extractDistanceOrReply(client *c, robj **argv,
                                      double *conversion) {
     double distance;
+    //从参数中获取距离
     if (getDoubleFromObjectOrReply(c, argv[0], &distance,
                                    "need numeric radius") != C_OK) {
         return -1;
     }
-
+    //从参数中获取单位的比例
     double to_meters = extractUnitOrReply(c,argv[1]);
+    //单位错误，返回错误
     if (to_meters < 0) return -1;
-
+    //把单位的放大比例返回给调用者
     if (conversion) *conversion = to_meters;
+    //乘上单位对应的放大比例，然后返回
     return distance * to_meters;
 }
 
@@ -168,9 +230,16 @@ double extractDistanceOrReply(client *c, robj **argv,
  * than "5.2144992818115 meters away." We provide 4 digits after the dot
  * so that the returned value is decently accurate even when the unit is
  * the kilometer. */
+/*
+ * 返回一个距离数据到客户端
+ * 之所以需要这个函数，是因为如果直接返回一个double的数据，精度会很高，完全没有必要
+ * 所以通过这个函数控制了返回的double字符串的精度，只保留了4位小数
+ */
 void addReplyDoubleDistance(client *c, double d) {
     char dbuf[128];
+    //double转字符串，只保留4位小数
     int dlen = snprintf(dbuf, sizeof(dbuf), "%.4f", d);
+    //返回给客户端
     addReplyBulkCBuffer(c, dbuf, dlen);
 }
 
@@ -180,24 +249,36 @@ void addReplyDoubleDistance(client *c, double d) {
  * only if the point is within the search area.
  *
  * returns C_OK if the point is included, or REIDS_ERR if it is outside. */
+/*
+ * 判断一个地理位置的是不是在指定范围内
+ * 如果是就加入地理位置数组，标记处距离
+ */
 int geoAppendIfWithinRadius(geoArray *ga, double lon, double lat, double radius, double score, sds member) {
     double distance, xy[2];
-
+    //从有序集分数中解析出经纬度
     if (!decodeGeohash(score,xy)) return C_ERR; /* Can't decode. */
     /* Note that geohashGetDistanceIfInRadiusWGS84() takes arguments in
      * reverse order: longitude first, latitude later. */
+    //判断位置是不是在指定范围内，并计算距离
     if (!geohashGetDistanceIfInRadiusWGS84(lon,lat, xy[0], xy[1],
                                            radius, &distance))
     {
+        //不在范围内，直接返回
         return C_ERR;
     }
 
     /* Append the new element. */
+    //如果在范围内，就需要添加到数组中去
     geoPoint *gp = geoArrayAppend(ga);
+    //记录经度
     gp->longitude = xy[0];
+    //记录维度
     gp->latitude = xy[1];
+    //记录距离
     gp->dist = distance;
+    //记录名称
     gp->member = member;
+    //记录分值
     gp->score = score;
     return C_OK;
 }
@@ -214,66 +295,84 @@ int geoAppendIfWithinRadius(geoArray *ga, double lon, double lat, double radius,
  * using multiple queries to the sorted set, that we later need to sort
  * via qsort. Similarly we need to be able to reject points outside the search
  * radius area ASAP in order to allocate and process more points than needed. */
+/*
+ * 在一个地理位置集中查找出处于某个范围的位置集合
+ */
 int geoGetPointsInRange(robj *zobj, double min, double max, double lon, double lat, double radius, geoArray *ga) {
     /* minex 0 = include min in range; maxex 1 = exclude max in range */
     /* That's: min <= val < max */
+    //范围
     zrangespec range = { .min = min, .max = max, .minex = 0, .maxex = 1 };
+    //地理位置数组中原来的个数
     size_t origincount = ga->used;
     sds member;
 
     if (zobj->encoding == OBJ_ENCODING_ZIPLIST) {
+        //ziplist的类型
         unsigned char *zl = zobj->ptr;
         unsigned char *eptr, *sptr;
         unsigned char *vstr = NULL;
         unsigned int vlen = 0;
         long long vlong = 0;
         double score = 0;
-
+        //在列表中查找出第一个在范围内的元素
         if ((eptr = zzlFirstInRange(zl, &range)) == NULL) {
             /* Nothing exists starting at our min.  No results. */
             return 0;
         }
-
+        //获取指向下一个的迭代器
         sptr = ziplistNext(zl, eptr);
         while (eptr) {
+            //获取有序集分数
             score = zzlGetScore(sptr);
 
             /* If we fell out of range, break. */
+            //判断分数是不是在范围内
             if (!zslValueLteMax(score, &range))
                 break;
 
             /* We know the element exists. ziplistGet should always succeed */
+            //获取列表的值
             ziplistGet(eptr, &vstr, &vlen, &vlong);
+            //得到地理位置名称
             member = (vstr == NULL) ? sdsfromlonglong(vlong) :
                                       sdsnewlen(vstr,vlen);
+            //判断地理位置是不是在范围内，是的话加入数组
             if (geoAppendIfWithinRadius(ga,lon,lat,radius,score,member)
                 == C_ERR) sdsfree(member);
+            //指向下一个
             zzlNext(zl, &eptr, &sptr);
         }
     } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+        //使用skiplist的方式
         zset *zs = zobj->ptr;
         zskiplist *zsl = zs->zsl;
         zskiplistNode *ln;
-
+        //获取第一个在范围内的元素
         if ((ln = zslFirstInRange(zsl, &range)) == NULL) {
             /* Nothing exists starting at our min.  No results. */
             return 0;
         }
 
         while (ln) {
+            //元素内容
             robj *o = ln->obj;
             /* Abort when the node is no longer in range. */
+            //判断分数是不是在范围内
             if (!zslValueLteMax(ln->score, &range))
                 break;
-
+            //获取地理位置名称
             member = (o->encoding == OBJ_ENCODING_INT) ?
                         sdsfromlonglong((long)o->ptr) :
                         sdsdup(o->ptr);
+            //判断地理位置是不是在范围内，是的话加入数组
             if (geoAppendIfWithinRadius(ga,lon,lat,radius,ln->score,member)
                 == C_ERR) sdsfree(member);
+            //指向下一个位置
             ln = ln->level[0].forward;
         }
     }
+    //返回找到的地理位置个数
     return ga->used - origincount;
 }
 
