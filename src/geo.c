@@ -746,28 +746,38 @@ void geohashCommand(client *c) {
  *
  * Returns an array of two-items arrays representing the x,y position of each
  * element specified in the arguments. For missing elements NULL is returned. */
+/*
+ * 获取一系列元素的经纬度
+ */
 void geoposCommand(client *c) {
     int j;
 
     /* Look up the requested zset */
     robj *zobj = NULL;
+    //获取redis有序集
     if ((zobj = lookupKeyReadOrReply(c, c->argv[1], shared.emptymultibulk))
         == NULL || checkType(c, zobj, OBJ_ZSET)) return;
 
     /* Report elements one after the other, using a null bulk reply for
      * missing elements. */
+    //返回总的位置个数
     addReplyMultiBulkLen(c,c->argc-2);
     for (j = 2; j < c->argc; j++) {
         double score;
+        //获取分数
         if (zsetScore(zobj, c->argv[j], &score) == C_ERR) {
+            //没有找到，所以返回[NULL]
             addReply(c,shared.nullmultibulk);
         } else {
             /* Decode... */
             double xy[2];
+            //把分数转换成经纬度
             if (!decodeGeohash(score,xy)) {
+                //转换不成功，所以返回[NULL]
                 addReply(c,shared.nullmultibulk);
                 continue;
             }
+            //转换成功，返回具体数据
             addReplyMultiBulkLen(c,2);
             addReplyDouble(c,xy[0]);
             addReplyDouble(c,xy[1]);
@@ -780,25 +790,34 @@ void geoposCommand(client *c) {
  * Return the distance, in meters by default, otherwise accordig to "unit",
  * between points ele1 and ele2. If one or more elements are missing NULL
  * is returned. */
+/*
+ * 计算两个地理位置之间的距离，默认单位为[米]
+ * 如果计算不成功会返回[NULL]
+ */
 void geodistCommand(client *c) {
     double to_meter = 1;
 
     /* Check if there is the unit to extract, otherwise assume meters. */
+    //如果设置了单位，就去计算该单位转为成米的比例。
     if (c->argc == 5) {
         to_meter = extractUnitOrReply(c,c->argv[4]);
+        //单位错误
         if (to_meter < 0) return;
     } else if (c->argc > 5) {
+        //参数过多
         addReply(c,shared.syntaxerr);
         return;
     }
 
     /* Look up the requested zset */
     robj *zobj = NULL;
+    //查找[key]对应的redis数据，必须是有序集的类型
     if ((zobj = lookupKeyReadOrReply(c, c->argv[1], shared.emptybulk))
         == NULL || checkType(c, zobj, OBJ_ZSET)) return;
 
     /* Get the scores. We need both otherwise NULL is returned. */
     double score1, score2, xyxy[4];
+    //获取元素的分数，可以通过这个分数来获取经纬度
     if (zsetScore(zobj, c->argv[2], &score1) == C_ERR ||
         zsetScore(zobj, c->argv[3], &score2) == C_ERR)
     {
@@ -807,9 +826,11 @@ void geodistCommand(client *c) {
     }
 
     /* Decode & compute the distance. */
+    //通过分数计算经纬度
     if (!decodeGeohash(score1,xyxy) || !decodeGeohash(score2,xyxy+2))
         addReply(c,shared.nullbulk);
     else
+        //计算得到的经纬度直接的距离，并进行单位的换算
         addReplyDouble(c,
             geohashGetDistance(xyxy[0],xyxy[1],xyxy[2],xyxy[3]) / to_meter);
 }
