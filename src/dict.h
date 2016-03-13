@@ -124,6 +124,10 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
     if ((d)->type->keyDestructor) \
         (d)->type->keyDestructor((d)->privdata, (entry)->key)
 
+/*
+ * 给entry设置可以，如果有keyDup函数指针，就调用回调函数来设置
+ * 如果没有就直接赋值
+ */
 #define dictSetKey(d, entry, _key_) do { \
     if ((d)->type->keyDup) \
         entry->key = (d)->type->keyDup((d)->privdata, _key_); \
@@ -144,6 +148,7 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
 #define dictGetDoubleVal(he) ((he)->v.d)
 #define dictSlots(d) ((d)->ht[0].size+(d)->ht[1].size)
 #define dictSize(d) ((d)->ht[0].used+(d)->ht[1].used)
+//判断字典是否需要重新进行hash计算
 #define dictIsRehashing(d) ((d)->rehashidx != -1)
 
 /* API */

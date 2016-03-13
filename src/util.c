@@ -44,66 +44,94 @@
 #include "sha1.h"
 
 /* Glob-style pattern matching. */
+/*
+ * 从一个字符串中查找匹配的子字符串
+ */
 int stringmatchlen(const char *pattern, int patternLen,
         const char *string, int stringLen, int nocase)
 {
     while(patternLen) {
         switch(pattern[0]) {
+        //以[*]开头的都需要跳过
         case '*':
             while (pattern[1] == '*') {
                 pattern++;
                 patternLen--;
             }
             if (patternLen == 1)
+                //全部跳过了，那就直接返回匹配
                 return 1; /* match */
+            //跳过[*]后继续匹配
             while(stringLen) {
+                //继续匹配剩余的字符串
                 if (stringmatchlen(pattern+1, patternLen-1,
                             string, stringLen, nocase))
+                    //匹配成功，返回
                     return 1; /* match */
+                //如果匹配不成功，源字符串后移继续匹配
                 string++;
                 stringLen--;
             }
+            //各种递归后还是没有找到，所以就要返回不匹配了
             return 0; /* no match */
             break;
         case '?':
+            //以[?]开始的字符串
+            //如果源字符串长度为零，就返回不匹配
             if (stringLen == 0)
                 return 0; /* no match */
+            //否则就直接返回匹配
             string++;
             stringLen--;
             break;
         case '[':
         {
+            //以[[]开始的字符串
+            //这个是对正则表达式的匹配
             int not, match;
 
             pattern++;
             patternLen--;
+            //取反标识
             not = pattern[0] == '^';
             if (not) {
                 pattern++;
                 patternLen--;
             }
+            //是否匹配
             match = 0;
             while(1) {
+                //以[\]开始的标识，标识接下来的字符串直接匹配
+                //以[\]开始的标识是可选的，如果不匹配也不会退出
                 if (pattern[0] == '\\') {
                     pattern++;
                     patternLen--;
+                    //直接匹配
                     if (pattern[0] == string[0])
                         match = 1;
                 } else if (pattern[0] == ']') {
+                    //结束符号
                     break;
                 } else if (patternLen == 0) {
+                    //如果出现这种情况，表示正则表达式的结尾符号丢失了
                     pattern--;
                     patternLen++;
                     break;
                 } else if (pattern[1] == '-' && patternLen >= 3) {
+                    //这里进行比较的是'a-z'类型的匹配
+                    //开始字符
                     int start = pattern[0];
+                    //结束字符
                     int end = pattern[2];
+                    //被比较的字符
                     int c = string[0];
+                    //如果起始字符大于结束字符，就需要调换
                     if (start > end) {
                         int t = start;
                         start = end;
                         end = t;
                     }
+                    //如果设置了不区分大小写，就需要全部转换成小写
                     if (nocase) {
                         start = tolower(start);
                         end = tolower(end);
@@ -111,13 +139,17 @@ int stringmatchlen(const char *pattern, int patternLen,
                     }
                     pattern += 2;
                     patternLen -= 2;
+                    //如果被匹配的字符在[start]和[end]之间，就是表示匹配上了
                     if (c >= start && c <= end)
                         match = 1;
                 } else {
+                    //其它情况直接进行匹配
                     if (!nocase) {
+                        //区分大小写
                         if (pattern[0] == string[0])
                             match = 1;
                     } else {
+                        //不区分大小写，就全部转换成小写
                         if (tolower((int)pattern[0]) == tolower((int)string[0]))
                             match = 1;
                     }
@@ -125,8 +157,10 @@ int stringmatchlen(const char *pattern, int patternLen,
                 pattern++;
                 patternLen--;
             }
+            //如果有取反标志，就把前面计算的结果进行取反
             if (not)
                 match = !match;
+            //如果不匹配，就返回
             if (!match)
                 return 0; /* no match */
             string++;
@@ -134,16 +168,20 @@ int stringmatchlen(const char *pattern, int patternLen,
             break;
         }
         case '\\':
+            //以[\]开头的就跳过
             if (patternLen >= 2) {
                 pattern++;
                 patternLen--;
             }
             /* fall through */
         default:
+            //直接判断字符串
             if (!nocase) {
+                //区分大小写，如果不一致，就返回不匹配
                 if (pattern[0] != string[0])
                     return 0; /* no match */
             } else {
+                //不区分大小写，全部转换为小写，如果不一致，就返回
                 if (tolower((int)pattern[0]) != tolower((int)string[0]))
                     return 0; /* no match */
             }
@@ -153,6 +191,7 @@ int stringmatchlen(const char *pattern, int patternLen,
         }
         pattern++;
         patternLen--;
+        //如果远字符串已经遍历的末尾，就需要把匹配的字符串中剩余的[*]跳过
         if (stringLen == 0) {
             while(*pattern == '*') {
                 pattern++;
@@ -161,11 +200,15 @@ int stringmatchlen(const char *pattern, int patternLen,
             break;
         }
     }
+    //如果匹配字符串和被匹配字符串都遍历完了，也表示匹配对了
     if (patternLen == 0 && stringLen == 0)
         return 1;
     return 0;
 }
 
+/*
+ * 从源字符串[string]中匹配出[pattern]，[nocase]标识是否区分大小写
+ */
 int stringmatch(const char *pattern, const char *string, int nocase) {
     return stringmatchlen(pattern,strlen(pattern),string,strlen(string),nocase);
 }
@@ -177,6 +220,10 @@ int stringmatch(const char *pattern, const char *string, int nocase) {
  * On parsing error, if *err is not NULL, it's set to 1, otherwise it's
  * set to 0. On error the function return value is 0, regardless of the
  * fact 'err' is NULL or not. */
+/*
+ * 把字符串表示的内存大小转换成数字
+ * 比如：1GB转换得到的是1073741824
+ */
 long long memtoll(const char *p, int *err) {
     const char *u;
     char buf[128];
@@ -188,8 +235,11 @@ long long memtoll(const char *p, int *err) {
 
     /* Search the first non digit character. */
     u = p;
+    //如果是以[-]开头的，就跳过
     if (*u == '-') u++;
+    //遍历找到第一个不是数字的字符
     while(*u && isdigit(*u)) u++;
+    //根据单位来计算转换的进制
     if (*u == '\0' || !strcasecmp(u,"b")) {
         mul = 1;
     } else if (!strcasecmp(u,"k")) {
@@ -205,13 +255,16 @@ long long memtoll(const char *p, int *err) {
     } else if (!strcasecmp(u,"gb")) {
         mul = 1024L*1024*1024;
     } else {
+        //无法识别的单位
         if (err) *err = 1;
         return 0;
     }
 
     /* Copy the digits into a buffer, we'll use strtoll() to convert
      * the digit (without the unit) into a number. */
+    //计算数字长度
     digits = u-p;
+    //如果数字长度超过缓冲区大小，就返回错误
     if (digits >= sizeof(buf)) {
         if (err) *err = 1;
         return 0;
@@ -221,17 +274,24 @@ long long memtoll(const char *p, int *err) {
 
     char *endptr;
     errno = 0;
+    //字符串转long long
     val = strtoll(buf,&endptr,10);
+    //如果转换失败，就返回错误
     if ((val == 0 && errno == EINVAL) || *endptr != '\0') {
         if (err) *err = 1;
         return 0;
     }
+    //把字符串转换得到的值再放大
     return val*mul;
 }
 
 /* Return the number of digits of 'v' when converted to string in radix 10.
  * See ll2string() for more information. */
+/*
+ * 计算一个64位整形数字的个数
+ */
 uint32_t digits10(uint64_t v) {
+    //直接进行大小比较，然后返回个数
     if (v < 10) return 1;
     if (v < 100) return 2;
     if (v < 1000) return 3;
@@ -248,17 +308,23 @@ uint32_t digits10(uint64_t v) {
         }
         return 11 + (v >= 100000000000UL);
     }
+    //如果超出了12个，就除[1000000000000]进行计算
     return 12 + digits10(v / 1000000000000UL);
 }
 
 /* Like digits10() but for signed values. */
+/*
+ * 功能和digits10()类似，但是可以处理带符号的数
+ */
 uint32_t sdigits10(int64_t v) {
     if (v < 0) {
+        //小于0的数，需要先取绝对值
         /* Abs value of LLONG_MIN requires special handling. */
         uint64_t uv = (v != LLONG_MIN) ?
                       (uint64_t)-v : ((uint64_t) LLONG_MAX)+1;
         return digits10(uv)+1; /* +1 for the minus. */
     } else {
+        //大于0的直接计算就可以了
         return digits10(v);
     }
 }
@@ -274,6 +340,9 @@ uint32_t sdigits10(int64_t v) {
  *
  * Modified in order to handle signed integers since the original code was
  * designed for unsigned integers. */
+/*
+ * long long 类型的数据转字符串
+ */
 int ll2string(char* dst, size_t dstlen, long long svalue) {
     static const char digits[201] =
         "0001020304050607080910111213141516171819"
@@ -286,6 +355,7 @@ int ll2string(char* dst, size_t dstlen, long long svalue) {
 
     /* The main loop works with 64bit unsigned integers for simplicity, so
      * we convert the number here and remember if it is negative. */
+    //如果[svalue]小于0，就需要计算绝对值
     if (svalue < 0) {
         if (svalue != LLONG_MIN) {
             value = -svalue;
@@ -299,13 +369,16 @@ int ll2string(char* dst, size_t dstlen, long long svalue) {
     }
 
     /* Check length. */
+    //计算数字个数
     uint32_t const length = digits10(value)+negative;
+    //需要的字符串长度大于缓冲区大小
     if (length >= dstlen) return 0;
 
     /* Null term. */
     uint32_t next = length;
     dst[next] = '\0';
     next--;
+    //以100
     while (value >= 100) {
         int const i = (value % 100) * 2;
         value /= 100;
